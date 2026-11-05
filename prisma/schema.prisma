@@ -1,0 +1,418 @@
+// PayTrack - Prisma Database Schema
+// PostgreSQL with full relational structure for fintech operations
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  ACCOUNTANT
+  VIEWER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PENDING
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  DUPLICATE
+}
+
+enum ReconciliationStatus {
+  MATCHED
+  PARTIAL_MATCH
+  OVERPAYMENT
+  UNMATCHED
+  DUPLICATE
+  FAILED
+}
+
+enum TransactionStatus {
+  DETECTED
+  VERIFIED
+  FAILED
+  UNKNOWN
+}
+
+enum NotificationType {
+  PAYMENT_RECEIVED
+  INVOICE_OVERDUE
+  RECONCILIATION_COMPLETE
+  SYSTEM
+}
+
+// ============================================================
+// CORE ENTITIES
+// ============================================================
+
+model User {
+  id                String    @id @default(uuid())
+  email             String    @unique
+  passwordHash      String    @map("password_hash")
+  firstName         String    @map("first_name")
+  lastName          String    @map("last_name")
+  emailVerified     Boolean   @default(false) @map("email_verified")
+  emailVerifyToken  String?   @map("email_verify_token")
+  passwordResetToken String?  @map("password_reset_token")
+  passwordResetExpiry DateTime? @map("password_reset_expiry")
+  lastLoginAt       DateTime? @map("last_login_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  deletedAt         DateTime? @map("deleted_at")
+
+  // Relations
+  workspaceMembers  WorkspaceMember[]
+  refreshTokens     RefreshToken[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id          String    @id @default(uuid())
+  token       String    @unique
+  userId      String    @map("user_id")
+  expiresAt   DateTime  @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  userAgent   String?   @map("user_agent")
+  ipAddress   String?   @map("ip_address")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model Workspace {
+  id            String    @id @default(uuid())
+  name          String
+  slug          String    @unique
+  description   String?
+  logoUrl       String?   @map("logo_url")
+  website       String?
+  email         String?
+  phone         String?
+  address       String?
+  city          String?
+  country       String?
+  currency      String    @default("USD")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  // Relations
+  members       WorkspaceMember[]
+  customers     Customer[]
+  invoices      Invoice[]
+  payments      Payment[]
+  stellarWallets StellarWallet[]
+  paymentLinks  PaymentLink[]
+  notifications Notification[]
+  auditLogs     AuditLog[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  userId      String    @map("user_id")
+  role        UserRole  @default(VIEWER)
+  joinedAt    DateTime  @default(now()) @map("joined_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+// ============================================================
+// CUSTOMERS
+// ============================================================
+
+model Customer {
+  id            String    @id @default(uuid())
+  workspaceId   String    @map("workspace_id")
+  name          String
+  email         String?
+  phone         String?
+  company       String?
+  address       String?
+  city          String?
+  country       String?
+  stellarAddress String?  @map("stellar_address")
+  notes         String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  workspace     Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoices      Invoice[]
+  payments      Payment[]
+
+  @@index([workspaceId])
+  @@index([email])
+  @@map("customers")
+}
+
+// ============================================================
+// INVOICES
+// ============================================================
+
+model Invoice {
+  id              String        @id @default(uuid())
+  workspaceId     String        @map("workspace_id")
+  customerId      String?       @map("customer_id")
+  invoiceNumber   String        @map("invoice_number")
+  status          InvoiceStatus @default(DRAFT)
+  currency        String        @default("USD")
+  // Amounts stored as NUMERIC strings to avoid floating-point errors
+  subtotal        Decimal       @db.Decimal(20, 8)
+  taxAmount       Decimal       @default(0) @db.Decimal(20, 8) @map("tax_amount")
+  discountAmount  Decimal       @default(0) @db.Decimal(20, 8) @map("discount_amount")
+  totalAmount     Decimal       @db.Decimal(20, 8) @map("total_amount")
+  paidAmount      Decimal       @default(0) @db.Decimal(20, 8) @map("paid_amount")
+  dueDate         DateTime?     @map("due_date")
+  issuedAt        DateTime?     @map("issued_at")
+  paidAt          DateTime?     @map("paid_at")
+  notes           String?
+  memo            String?       // Used for Stellar payment memo matching
+  publicToken     String        @unique @default(uuid()) @map("public_token")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  deletedAt       DateTime?     @map("deleted_at")
+
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  customer        Customer?     @relation(fields: [customerId], references: [id])
+  items           InvoiceItem[]
+  payments        Payment[]
+  paymentLinks    PaymentLink[]
+
+  @@unique([workspaceId, invoiceNumber])
+  @@index([workspaceId])
+  @@index([customerId])
+  @@index([status])
+  @@index([publicToken])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String    @id @default(uuid())
+  invoiceId   String    @map("invoice_id")
+  description String
+  quantity    Decimal   @db.Decimal(10, 4)
+  unitPrice   Decimal   @db.Decimal(20, 8) @map("unit_price")
+  amount      Decimal   @db.Decimal(20, 8)  // quantity * unitPrice
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+// ============================================================
+// PAYMENTS & BLOCKCHAIN
+// ============================================================
+
+model Payment {
+  id                    String        @id @default(uuid())
+  workspaceId           String        @map("workspace_id")
+  invoiceId             String?       @map("invoice_id")
+  customerId            String?       @map("customer_id")
+  status                PaymentStatus @default(PENDING)
+  amount                Decimal       @db.Decimal(20, 8)
+  currency              String        @default("USDC")
+  stellarTransactionHash String?      @unique @map("stellar_transaction_hash")
+  // Idempotency key prevents double-processing
+  idempotencyKey        String        @unique @map("idempotency_key")
+  receivedAt            DateTime?     @map("received_at")
+  verifiedAt            DateTime?     @map("verified_at")
+  notes                 String?
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  workspace             Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoice               Invoice?              @relation(fields: [invoiceId], references: [id])
+  customer              Customer?             @relation(fields: [customerId], references: [id])
+  blockchainTransaction BlockchainTransaction?
+  reconciliation        PaymentReconciliation?
+
+  @@index([workspaceId])
+  @@index([invoiceId])
+  @@index([stellarTransactionHash])
+  @@index([status])
+  @@map("payments")
+}
+
+model BlockchainTransaction {
+  id                String            @id @default(uuid())
+  paymentId         String            @unique @map("payment_id")
+  transactionHash   String            @unique @map("transaction_hash")
+  network           String            // 'testnet' or 'mainnet'
+  ledger            BigInt?
+  sourceAccount     String            @map("source_account")
+  destinationAccount String           @map("destination_account")
+  assetCode         String            @map("asset_code")   // e.g., "USDC"
+  assetIssuer       String            @map("asset_issuer")
+  amount            Decimal           @db.Decimal(20, 8)
+  memo              String?
+  status            TransactionStatus @default(DETECTED)
+  verifiedAt        DateTime?         @map("verified_at")
+  stellarCreatedAt  DateTime?         @map("stellar_created_at")
+  rawData           Json?             @map("raw_data")     // Full Horizon response
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  payment           Payment           @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([transactionHash])
+  @@index([destinationAccount])
+  @@map("blockchain_transactions")
+}
+
+model PaymentReconciliation {
+  id              String                @id @default(uuid())
+  paymentId       String                @unique @map("payment_id")
+  invoiceId       String?               @map("invoice_id")
+  status          ReconciliationStatus
+  paymentAmount   Decimal               @db.Decimal(20, 8) @map("payment_amount")
+  invoiceAmount   Decimal?              @db.Decimal(20, 8) @map("invoice_amount")
+  difference      Decimal?              @db.Decimal(20, 8) // positive = overpayment, negative = underpayment
+  matchConfidence Decimal?              @db.Decimal(5, 2) @map("match_confidence") // 0-100
+  notes           String?
+  reconciledAt    DateTime              @default(now()) @map("reconciled_at")
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+
+  payment         Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([status])
+  @@map("payment_reconciliations")
+}
+
+// ============================================================
+// STELLAR WALLETS
+// ============================================================
+
+model StellarWallet {
+  id              String    @id @default(uuid())
+  workspaceId     String    @map("workspace_id")
+  publicKey       String    @map("public_key")   // Stellar G-address — never store secret keys
+  label           String?
+  network         String    @default("testnet")  // 'testnet' or 'mainnet'
+  isActive        Boolean   @default(true) @map("is_active")
+  isMonitored     Boolean   @default(true) @map("is_monitored")
+  lastCursor      String?   @map("last_cursor")  // Horizon pagination cursor for monitoring
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, publicKey, network])
+  @@index([workspaceId])
+  @@index([publicKey])
+  @@map("stellar_wallets")
+}
+
+// ============================================================
+// PAYMENT LINKS
+// ============================================================
+
+model PaymentLink {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  invoiceId   String?   @map("invoice_id")
+  token       String    @unique @default(uuid())
+  title       String?
+  description String?
+  amount      Decimal?  @db.Decimal(20, 8)
+  currency    String    @default("USDC")
+  expiresAt   DateTime? @map("expires_at")
+  isActive    Boolean   @default(true) @map("is_active")
+  viewCount   Int       @default(0) @map("view_count")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoice     Invoice?  @relation(fields: [invoiceId], references: [id])
+
+  @@index([workspaceId])
+  @@index([token])
+  @@map("payment_links")
+}
+
+// ============================================================
+// NOTIFICATIONS & AUDIT
+// ============================================================
+
+model Notification {
+  id          String           @id @default(uuid())
+  workspaceId String           @map("workspace_id")
+  userId      String?          @map("user_id")
+  type        NotificationType
+  title       String
+  message     String
+  data        Json?
+  readAt      DateTime?        @map("read_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User?            @relation(fields: [userId], references: [id])
+
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  workspaceId String    @map("workspace_id")
+  userId      String?   @map("user_id")
+  action      String    // e.g., "invoice.created", "payment.verified"
+  entityType  String    @map("entity_type")  // e.g., "Invoice", "Payment"
+  entityId    String?   @map("entity_id")
+  oldData     Json?     @map("old_data")
+  newData     Json?     @map("new_data")
+  ipAddress   String?   @map("ip_address")
+  userAgent   String?   @map("user_agent")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([workspaceId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
