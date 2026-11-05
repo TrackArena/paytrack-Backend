@@ -6,8 +6,9 @@ Built with Node.js, Express, TypeScript, PostgreSQL (Prisma ORM), and the Stella
 
 ## Architecture
 
-```
-src/
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design, data flow diagrams, database entity relationships, authentication architecture, and Stellar integration details.
+
+
 ├── app.ts                  Express app (middleware, routes)
 ├── index.ts                Server entry point + transaction monitor
 ├── lib/
